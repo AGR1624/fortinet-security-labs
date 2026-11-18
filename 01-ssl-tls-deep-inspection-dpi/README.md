@@ -1,256 +1,133 @@
-\# Lab 01: InspecciÃ³n Profunda SSL/TLS (Deep Packet Inspection - DPI) con PKI Propia
+# Lab 01: Inspección Profunda SSL/TLS (Deep Packet Inspection - DPI) con PKI Propia
 
-
-
-\## Ficha TÃ©cnica y Cumplimiento
-
-
+## Ficha Técnica y Cumplimiento
 
 | Campo | Detalle |
-
 | :--- | :--- |
+| **ID del Documento** | SOP-SEC-001 |
+| **Versión / Fecha** | v1.1 — Noviembre 2026 |
+| **Plataforma** | VMware Workstation Pro, FortiGate-VM64 (FortiOS 7.6.8 Trial), Kali Linux 2026.3 |
+| **Controles ISO/IEC 27002:2022** | **A.8.24** (Uso de criptografía), **A.8.23** (Filtrado web), **A.8.15** (Registro de eventos), **A.8.20** (Seguridad de redes) |
+| **Marco NIST** | NIST SP 800-41 Rev. 1 / NIST CSF 2.0 (*Protect* y *Detect*) |
 
-| \*\*ID del Documento\*\* | SOP-SEC-001 |
+---
 
-| \*\*VersiÃ³n / Fecha\*\* | v1.1 â€” Noviembre 2026 |
+## 1. Escenario y Objetivo de Negocio
 
-| \*\*Plataforma\*\* | VMware Workstation Pro, FortiGate-VM64 (FortiOS 7.6.8 Trial), Kali Linux 2026.3 |
+Con la inspección básica por certificado (`certificate-inspection`), el firewall únicamente inspecciona el encabezado SNI del saludo TLS (por ejemplo, `wikipedia.org` o `github.com`), siendo incapaz de auditar rutas internas, parámetros de búsqueda o descargas de archivos dentro de sesiones HTTPS.
 
-| \*\*Controles ISO/IEC 27002:2022\*\* | \*\*A.8.24\*\* (Uso de criptografÃ­a), \*\*A.8.23\*\* (Filtrado web), \*\*A.8.15\*\* (Registro de eventos), \*\*A.8.20\*\* (Seguridad de redes) |
+El objetivo de este laboratorio es implementar **Inspección Profunda SSL/TLS (DPI)** mediante una Autoridad Certificadora (CA) interna de 2048 bits para descifrar tráfico HTTPS de forma transparente, auditar URLs completas y aplicar controles granulares por ruta específica, extensión de archivo y palabras clave sin depender de licencias en la nube de FortiGuard.
 
-| \*\*Marco NIST\*\* | NIST SP 800-41 Rev. 1 / NIST CSF 2.0 (\*Protect\* y \*Detect\*) |
+---
 
+## 2. Topología y Direccionamiento
 
-
-\---
-
-
-
-\## 1. Escenario y Objetivo de Negocio
-
-
-
-Con la inspecciÃ³n bÃ¡sica por certificado (`certificate-inspection`), el firewall Ãºnicamente inspecciona el encabezado SNI del saludo TLS (por ejemplo, `wikipedia.org` o `github.com`), siendo incapaz de auditar rutas internas, parÃ¡metros de bÃºsqueda o descargas de archivos dentro de sesiones HTTPS.
-
-
-
-El objetivo de este laboratorio es implementar \*\*InspecciÃ³n Profunda SSL/TLS (DPI)\*\* mediante una Autoridad Certificadora (CA) interna de 2048 bits para descifrar trÃ¡fico HTTPS de forma transparente, auditar URLs completas y aplicar controles granulares por ruta especÃ­fica, extensiÃ³n de archivo y palabras clave sin depender de licencias en la nube de FortiGuard.
-
-
-
-\---
-
-
-
-\## 2. TopologÃ­a y Direccionamiento
-
-
-
-```mermaid
-
+~~~mermaid
 flowchart LR
+    K[Kali Linux 2026.3<br/>192.168.10.2/24<br/>Almacén OS + Firefox NSS] -- "HTTPS cifrado con CA FortiDPI_2048" --> FG[FortiGate VM64<br/>port2: 192.168.10.1<br/>port1: NAT VMnet8]
+    FG -- "HTTPS cifrado con Cert Público" --> W((Internet<br/>Wikipedia / GitHub / W3C))
+~~~
 
-&#x20;   K\[Kali Linux 2026.3<br/>192.168.10.2/24<br/>AlmacÃ©n OS + Firefox NSS] -- "HTTPS cifrado con CA FortiDPI\_2048" --> FG\[FortiGate VM64<br/>port2: 192.168.10.1<br/>port1: NAT VMnet8]
-
-&#x20;   FG -- "HTTPS cifrado con Cert PÃºblico" --> W((Internet<br/>Wikipedia / GitHub / W3C))
-
-```
-
-
-
-| Dispositivo | Interfaz | Red Virtual | DirecciÃ³n IP | Rol |
-
+| Dispositivo | Interfaz | Red Virtual | Dirección IP | Rol |
 | :--- | :--- | :--- | :--- | :--- |
+| **FortiGate-VM64** | `port1` | VMnet8 (NAT) | DHCP (`192.168.167.x`) | WAN / Salida a Internet |
+| **FortiGate-VM64** | `port2` | VMnet2 (Host-only) | `192.168.10.1/24` | LAN / Gateway + Proxy DPI |
+| **Kali Linux 2026.3** | `eth0` | VMnet2 (Host-only) | `192.168.10.2/24` | Cliente interno auditado |
 
-| \*\*FortiGate-VM64\*\* | `port1` | VMnet8 (NAT) | DHCP (`192.168.167.x`) | WAN / Salida a Internet |
+---
 
-| \*\*FortiGate-VM64\*\* | `port2` | VMnet2 (Host-only) | `192.168.10.1/24` | LAN / Gateway + Proxy DPI |
+## 3. Implementación Técnica
 
-| \*\*Kali Linux 2026.3\*\* | `eth0` | VMnet2 (Host-only) | `192.168.10.2/24` | Cliente interno auditado |
+### 3.1 Generación de CA Propia (RSA 2048 bits) en Kali Linux
+Debido a que la CA integrada por defecto (`Fortinet_CA_SSL`) utiliza RSA de 1024 bits y es rechazada por navegadores modernos, se generó una entidad certificadora conforme a estándares criptográficos vigentes (`CN = FortiGate_DPI_2048`):
 
+~~~bash
+openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout FortiDPI_2048.key \
+  -out FortiDPI_2048.crt \
+  -days 3650 \
+  -subj "/CN=FortiGate_DPI_2048" \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign"
+~~~
 
+### 3.2 Distribución de Confianza en el Cliente (OS y Firefox)
+1. **Almacén raíz del sistema operativo (`curl`, `wget`, `openssl`, `apt`):**
+   ~~~bash
+   sudo cp FortiDPI_2048.crt /usr/local/share/ca-certificates/FortiDPI_2048.crt
+   sudo update-ca-certificates
+   ~~~
+2. **Almacén NSS de Firefox:** Importación manual desde `about:preferences#privacy` > *Certificates* > *View Certificates* > *Authorities* marcando *"Trust this CA to identify websites"*.
 
-\---
+### 3.3 Conversión PKCS#1 e Inyección vía SSH en FortiOS 7.6.8
+OpenSSL 3.x genera claves privadas en formato PKCS#8 (`-----BEGIN PRIVATE KEY-----`), mientras que FortiOS exige formato RSA tradicional PKCS#1 (`-----BEGIN RSA PRIVATE KEY-----`). Para evitar el fallo del importador gráfico y el límite de pegado de la consola web, se convirtió la clave a formato tradicional y se inyectó directamente por SSH hacia la interfaz LAN (`192.168.10.1`):
 
+~~~bash
+{
+  echo 'config vpn certificate local'
+  echo '    edit "FortiDPI_2048"'
+  printf '        set private-key "%s"\n' "$(openssl rsa -in FortiDPI_2048.key -traditional 2>/dev/null)"
+  printf '        set certificate "%s"\n' "$(cat FortiDPI_2048.crt)"
+  echo '    next'
+  echo 'end'
+} | ssh -o StrictHostKeyChecking=no admin@192.168.10.1
+~~~
 
+### 3.4 Políticas de Filtrado Granular e Inspección
+* **SSL/SSH Inspection (`custom-deep-inspection`):** Se asignó `FortiDPI_2048` como *CA certificate*.
+* **Web Filter (`Laboratorio`):** Se configuró *Rating Options* en *Allow all websites* y se implementaron 4 reglas en *Static URL Filter*:
+  1. `es.wikipedia.org/wiki/Linux` (*Simple* / *Block*) — Bloqueo de artículo específico dentro de Wikipedia.
+  2. `github.com/torvalds/linux` (*Simple* / *Block*) — Bloqueo de repositorio específico dentro de GitHub.
+  3. `*.pdf` (*Wildcard* / *Block*) — Prevención de descarga de documentos PDF dentro de sesiones HTTPS.
+  4. `*kali*` (*Wildcard* / *Block*) — Bloqueo por palabra clave en cualquier ruta URL.
+* **Firewall Policy (`Laboratorio`):** Restringida a los servicios `DNS`, `HTTP` y `HTTPS` con NAT activo, vinculando los perfiles `Laboratorio` (Web Filter) y `custom-deep-inspection` (SSL Inspection) con registro en `All Sessions`.
 
-\## 3. ImplementaciÃ³n TÃ©cnica
+---
 
+## 4. Validación y Evidencias
 
+### 4.1 Subrutas en Wikipedia (`Allowed` vs. `Blocked`)
+Al acceder a `https://es.wikipedia.org/wiki/Fortinet` el sitio carga con normalidad bajo el certificado `FortiGate_DPI_2048`, mientras que `https://es.wikipedia.org/wiki/Linux` dentro del mismo dominio es interceptado y bloqueado.
 
-\### 3.1 GeneraciÃ³n de CA Propia (RSA 2048 bits) en Kali Linux
+![Acceso permitido a ruta Fortinet](evidence/01-allowed-https-fortinet.png)
+![Bloqueo granular en ruta Linux](evidence/02-blocked-https-linux.png)
 
-Debido a que la CA integrada por defecto (`Fortinet\_CA\_SSL`) utiliza RSA de 1024 bits y es rechazada por navegadores modernos, se generÃ³ una entidad certificadora conforme a estÃ¡ndares criptogrÃ¡ficos vigentes (`CN = FortiGate\_DPI\_2048`):
+### 4.2 Repositorios Específicos en GitHub (`Allowed` vs. `Blocked`)
+Bajo el mismo encabezado SNI (`github.com`), FortiGate descifra la petición HTTP interna para permitir `https://github.com/fortinet` y bloquear `https://github.com/torvalds/linux`.
 
+![Acceso permitido a GitHub Fortinet](evidence/03-allowed-github-fortinet.png)
+![Bloqueo granular en repositorio GitHub](evidence/04-blocked-github-torvalds.png)
 
+### 4.3 Bloqueo de Descarga `.pdf` y Filtrado por Palabra Clave (`*kali*`) en HTTPS
+El motor DPI inspecciona las rutas y extensiones solicitadas dentro del túnel cifrado, bloqueando tanto la descarga directa de archivos `.pdf` como cualquier ruta que contenga palabras restringidas.
 
-```bash
+![Bloqueo de extensión PDF en HTTPS](evidence/05-blocked-https-pdf-extension.png)
+![Bloqueo por palabra clave en URL](evidence/06-blocked-keyword-kali.png)
 
-openssl req -x509 -newkey rsa:2048 -nodes \\
+### 4.4 Validación Criptográfica por Consola (`openssl` y `curl`)
+Verificación mediante `openssl s_client` confirmando que el emisor es la CA propia (`issuer=CN = FortiGate_DPI_2048`) y contraste con `curl`.
 
-&#x20; -keyout FortiDPI\_2048.key \\
+![Validación CLI con OpenSSL y Curl](evidence/07-cli-openssl-curl-validation.png)
 
-&#x20; -out FortiDPI\_2048.crt \\
+### 4.5 Pruebas Adicionales de Contraste URL (`Allowed` vs. `Blocked`)
+Validación complementaria de navegación limpia frente a intercepción activa del filtro local.
 
-&#x20; -days 3650 \\
+![Prueba adicional URL permitida](evidence/08-allowed-url.png)
+![Prueba adicional URL bloqueada](evidence/09-blocked-url.png)
 
-&#x20; -subj "/CN=FortiGate\_DPI\_2048" \\
+### 4.6 Auditoría de Eventos en FortiGate (`Web Filter Logs`)
+En **Log & Report > Security Events > Web Filter**, el firewall registra cada bloqueo mostrando la URL completa descifrada originada desde `192.168.10.2`.
 
-&#x20; -addext "basicConstraints=critical,CA:TRUE" \\
+![Auditoría de URL completa en FortiGate](evidence/10-logs-web-filter.png)
 
-&#x20; -addext "keyUsage=critical,keyCertSign,cRLSign"
+---
 
-```
+## 5. Matriz de Troubleshooting (Incidencias Resueltas)
 
-
-
-\### 3.2 DistribuciÃ³n de Confianza en el Cliente (OS y Firefox)
-
-1\. \*\*AlmacÃ©n raÃ­z del sistema operativo (`curl`, `wget`, `openssl`, `apt`):\*\*
-
-&#x20;  ```bash
-
-&#x20;  sudo cp FortiDPI\_2048.crt /usr/local/share/ca-certificates/FortiDPI\_2048.crt
-
-&#x20;  sudo update-ca-certificates
-
-&#x20;  ```
-
-2\. \*\*AlmacÃ©n NSS de Firefox:\*\* ImportaciÃ³n manual desde `about:preferences#privacy` > \*Certificates\* > \*View Certificates\* > \*Authorities\* marcando \*"Trust this CA to identify websites"\*.
-
-
-
-\### 3.3 ConversiÃ³n e ImportaciÃ³n de la CA en FortiOS 7.6.8
-
-OpenSSL 3.x genera claves privadas en formato PKCS#8 (`-----BEGIN PRIVATE KEY-----`), mientras que FortiOS exige formato RSA tradicional PKCS#1 (`-----BEGIN RSA PRIVATE KEY-----`):
-
-
-
-```bash
-
-openssl rsa -in FortiDPI\_2048.key -traditional -out FortiDPI\_2048\_rsa.key
-
-```
-
-
-
-La clave convertida y el certificado pÃºblico se cargaron en `config vpn certificate local` bajo el objeto `"FortiDPI\_2048"` (`CN = FortiGate\_DPI\_2048`).
-
-
-
-\### 3.4 PolÃ­ticas de Filtrado Granular e InspecciÃ³n
-
-\* \*\*SSL/SSH Inspection (`custom-deep-inspection`):\*\* Se asignÃ³ `FortiDPI\_2048` como \*CA certificate\*.
-
-\* \*\*Web Filter (`Laboratorio`):\*\* Se configurÃ³ \*Rating Options\* en \*Allow all websites\* y se implementaron 4 reglas en \*Static URL Filter\*:
-
-&#x20; 1. `es.wikipedia.org/wiki/Linux` (\*Simple\* / \*Block\*) â€” Bloqueo de artÃ­culo especÃ­fico dentro de Wikipedia.
-
-&#x20; 2. `github.com/torvalds/linux` (\*Simple\* / \*Block\*) â€” Bloqueo de repositorio especÃ­fico dentro de GitHub.
-
-&#x20; 3. `\*.pdf` (\*Wildcard\* / \*Block\*) â€” PrevenciÃ³n de descarga de documentos PDF dentro de sesiones HTTPS.
-
-&#x20; 4. `\*kali\*` (\*Wildcard\* / \*Block\*) â€” Bloqueo por palabra clave en cualquier ruta URL.
-
-\* \*\*Firewall Policy (`Laboratorio`):\*\* Restringida a los servicios `DNS`, `HTTP` y `HTTPS` con NAT activo, vinculando los perfiles `Laboratorio` (Web Filter) y `custom-deep-inspection` (SSL Inspection) con registro en `All Sessions`.
-
-
-
-\---
-
-
-
-\## 4. ValidaciÃ³n y Evidencias
-
-
-
-\### 4.1 Subrutas en Wikipedia (`Allowed` vs. `Blocked`)
-
-Al acceder a `https://es.wikipedia.org/wiki/Fortinet` el sitio carga con normalidad bajo el certificado `FortiGate\_DPI\_2048`, mientras que `https://es.wikipedia.org/wiki/Linux` dentro del mismo dominio es interceptado y bloqueado.
-
-
-
-!\[Acceso permitido a ruta Fortinet](evidence/01-allowed-https-fortinet.png)
-
-!\[Bloqueo granular en ruta Linux](evidence/02-blocked-https-linux.png)
-
-
-
-\### 4.2 Repositorios EspecÃ­ficos en GitHub (`Allowed` vs. `Blocked`)
-
-Bajo el mismo encabezado SNI (`github.com`), FortiGate descifra la peticiÃ³n HTTP interna para permitir `https://github.com/fortinet` y bloquear `https://github.com/torvalds/linux`.
-
-
-
-!\[Acceso permitido a GitHub Fortinet](evidence/03-allowed-github-fortinet.png)
-
-!\[Bloqueo granular en repositorio GitHub](evidence/04-blocked-github-torvalds.png)
-
-
-
-\### 4.3 Bloqueo de Descarga `.pdf` y Filtrado por Palabra Clave (`\*kali\*`) en HTTPS
-
-El motor DPI inspecciona las rutas y extensiones solicitadas dentro del tÃºnel cifrado, bloqueando tanto la descarga directa de archivos `.pdf` como cualquier ruta que contenga palabras restringidas.
-
-
-
-!\[Bloqueo de extensiÃ³n PDF en HTTPS](evidence/05-blocked-https-pdf-extension.png)
-
-!\[Bloqueo por palabra clave en URL](evidence/06-blocked-keyword-kali.png)
-
-
-
-\### 4.4 ValidaciÃ³n CriptogrÃ¡fica por Consola (`openssl` y `curl`)
-
-VerificaciÃ³n mediante `openssl s\_client` confirmando que el emisor es la CA propia (`issuer=CN = FortiGate\_DPI\_2048`) y contraste con `curl`.
-
-
-
-!\[ValidaciÃ³n CLI con OpenSSL y Curl](evidence/07-cli-openssl-curl-validation.png)
-
-
-
-\### 4.5 Pruebas Adicionales de Contraste URL (`Allowed` vs. `Blocked`)
-
-ValidaciÃ³n complementaria de navegaciÃ³n limpia frente a intercepciÃ³n activa del filtro local.
-
-
-
-!\[Prueba adicional URL permitida](evidence/08-allowed-url.png)
-
-!\[Prueba adicional URL bloqueada](evidence/09-blocked-url.png)
-
-
-
-\### 4.6 AuditorÃ­a de Eventos en FortiGate (`Web Filter Logs`)
-
-En \*\*Log \& Report > Security Events > Web Filter\*\*, el firewall registra cada bloqueo mostrando la URL completa descifrada originada desde `192.168.10.2`.
-
-
-
-!\[AuditorÃ­a de URL completa en FortiGate](evidence/10-logs-web-filter.png)
-
-
-
-\---
-
-
-
-\## 5. Matriz de Troubleshooting (Incidencias Resueltas)
-
-
-
-| SÃ­ntoma / Error | Causa RaÃ­z | SoluciÃ³n Aplicada |
-
+| Síntoma / Error | Causa Raíz | Solución Aplicada |
 | :--- | :--- | :--- |
-
-| BotÃ³n \*Clone\* deshabilitado en el perfil `deep-inspection` | Los perfiles predeterminados del sistema son de solo lectura en la GUI de FortiOS 7.6.8. | Se utilizÃ³ y personalizÃ³ el perfil editable integrado `custom-deep-inspection`. |
-
-| El botÃ³n de menÃº \*Settings\* en Firefox no abrÃ­a la ventana en Kali | Fallo de renderizado de menÃºs emergentes en el entorno grÃ¡fico XFCE. | Se accediÃ³ directamente mediante la URL interna `about:preferences#privacy` en la barra de direcciones. |
-
-| `MOZILLA\_PKIX\_ERROR\_INADEQUATE\_KEY\_SIZE` al navegar | La CA predeterminada `Fortinet\_CA\_SSL` usa RSA de 1024 bits; Firefox exige mÃ­nimo 2048 bits. | Se generÃ³ e instalÃ³ una CA propia de 2048 bits (`FortiDPI\_2048` / `CN = FortiGate\_DPI\_2048`) con extensiones `CA:TRUE` y `keyCertSign`. |
-
-| `Incorrect certificate file key size for CA/LOCAL/REMOTE cert.` | OpenSSL 3.x genera claves PKCS#8 y archivos `.p12` con cifrado PBES2/AES no soportados por el importador web de FortiOS 7.6.8. | Se convirtiÃ³ la clave privada a RSA tradicional (`-traditional`) y se cargÃ³ directamente por CLI/SSH. |
-
-| `Invalid private key` / truncamiento al pegar en Web CLI | La consola web de FortiOS limita el pegado a \~1,000 caracteres y corta lÃ­neas Base64. | Se enviÃ³ el bloque completo de clave y certificado mediante tuberÃ­a (`pipe`) SSH / bloques segmentados hacia `192.168.10.1`. |
-
+| Botón *Clone* deshabilitado en el perfil `deep-inspection` | Los perfiles predeterminados del sistema son de solo lectura en la GUI de FortiOS 7.6.8. | Se utilizó y personalizó el perfil editable integrado `custom-deep-inspection`. |
+| El botón de menú *Settings* en Firefox no abría la ventana en Kali | Fallo de renderizado de menús emergentes en el entorno gráfico XFCE. | Se accedió directamente mediante la URL interna `about:preferences#privacy` en la barra de direcciones. |
+| `MOZILLA_PKIX_ERROR_INADEQUATE_KEY_SIZE` al navegar | La CA predeterminada `Fortinet_CA_SSL` usa RSA de 1024 bits; Firefox exige mínimo 2048 bits. | Se generó e instaló una CA propia de 2048 bits (`FortiDPI_2048` / `CN = FortiGate_DPI_2048`) con extensiones `CA:TRUE` y `keyCertSign`. |
+| `Incorrect certificate file key size for CA/LOCAL/REMOTE cert.` | OpenSSL 3.x genera claves PKCS#8 y archivos `.p12` con cifrado PBES2/AES no soportados por el importador web de FortiOS 7.6.8. | Se convirtió la clave privada a RSA tradicional (`-traditional`) y se cargó por CLI. |
+| `Invalid private key` / truncamiento al pegar en Web CLI | La consola web de FortiOS limita el pegado a ~1,000 caracteres y corta caracteres en el borde de línea Base64. | Se automatizó la inyección íntegra de clave y certificado mediante tubería (`pipe`) SSH desde Kali hacia `192.168.10.1`. |
