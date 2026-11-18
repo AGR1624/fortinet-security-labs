@@ -1,0 +1,7 @@
+*.key
+*.p12
+*.pfx
+*.pem
+.DS_Store
+Thumbs.db
+desktop.ini
